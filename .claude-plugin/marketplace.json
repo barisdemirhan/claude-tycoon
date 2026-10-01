@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claude-tycoon",
+  "description": "Token Tycoon, an idle game for Claude Code where Claude's tool calls earn the money",
+  "owner": {
+    "name": "Barış Demirhan"
+  },
+  "plugins": [
+    {
+      "name": "tycoon",
+      "description": "Token Tycoon, an idle game in a pane: Claude's tool calls earn tokens, tokens buy generators and upgrades, and everything is kept between sessions. /tycoon opens it",
+      "source": "./",
+      "category": "fun"
+    }
+  ]
+}

@@ -847,9 +847,9 @@ const placed = (
   frame: Frame,
   screen: Canvas,
   part: (frame: Frame, canvas: Canvas) => void,
-  at: { x: number; row: number; w: number; h: number },
+  at: { x: number; row: number; wide: number; high: number },
 ): Hit[] => {
-  const canvas = canvasOf(at.w, at.h)
+  const canvas = canvasOf(at.wide, at.high)
   const own: Frame = { ...frame, hits: [] }
 
   part(own, canvas)
@@ -885,10 +885,10 @@ const paint = (screen: Canvas, game: Game, props: GameProps): Hit[] => {
       ...placed(frame, screen, shop, {
         x: left + 3,
         row: 0,
-        w: screen.w - left - 3,
-        h: screen.h,
+        wide: screen.w - left - 3,
+        high: screen.h,
       }),
-      ...placed(frame, screen, stage, { x: 0, row: 0, w: left, h: screen.h }),
+      ...placed(frame, screen, stage, { x: 0, row: 0, wide: left, high: screen.h }),
     ]
   }
 
@@ -905,10 +905,10 @@ const paint = (screen: Canvas, game: Game, props: GameProps): Hit[] => {
     ...placed(frame, screen, shop, {
       x: 0,
       row: high + 1,
-      w: screen.w,
-      h: screen.h - high - 1,
+      wide: screen.w,
+      high: screen.h - high - 1,
     }),
-    ...placed(frame, screen, stage, { x: 0, row: 0, w: screen.w, h: high }),
+    ...placed(frame, screen, stage, { x: 0, row: 0, wide: screen.w, high }),
   ]
 }
 

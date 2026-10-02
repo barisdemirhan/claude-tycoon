@@ -1,6 +1,6 @@
 {
   "name": "tycoon",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Token Tycoon, an idle game in a pane: Claude's tool calls earn tokens, tokens buy generators and upgrades, and everything is kept between sessions. /tycoon opens it",
   "author": {
     "name": "Barış Demirhan",
@@ -8,6 +8,8 @@
   },
   "repository": "https://github.com/barisdemirhan/claude-tycoon",
   "privacyPolicyUrl": "https://github.com/barisdemirhan/claude-tycoon/blob/main/PRIVACY.md",
+  "supportUrl": "https://github.com/barisdemirhan/claude-tycoon/issues",
+  "documentationUrl": "https://github.com/barisdemirhan/claude-tycoon#readme",
   "license": "MIT",
   "types": "./types/index.d.ts"
 }

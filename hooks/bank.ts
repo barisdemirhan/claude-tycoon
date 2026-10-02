@@ -16,10 +16,10 @@ export const fieldOf = (value: unknown, key: string): unknown =>
     ? Object.entries(value).find(([name]) => name === key)?.[1]
     : undefined
 
-const toAmount = (value: unknown): number =>
+export const toAmount = (value: unknown): number =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0
 
-const toCount = (value: unknown): number => Math.floor(toAmount(value))
+export const toCount = (value: unknown): number => Math.floor(toAmount(value))
 
 /** The counts under the keys `isKnown` takes, each a whole number. */
 const toCounts = (

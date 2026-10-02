@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["es2023"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": [
+    "index.ts",
+    "worker-configuration.d.ts",
+    "../hooks/bank.ts",
+    "../hooks/catalog.ts",
+    "../hooks/format.ts",
+    "../hooks/sim.ts"
+  ]
+}

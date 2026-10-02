@@ -21,6 +21,10 @@ export type Perks = {
   all: number
 }
 
+// Raised when a rule or a price changes what a save can hold: the
+// leaderboard's server takes only the saves played by its own rules.
+export const RULES = 1
+
 const HOUR = 3_600_000
 const GROWTH = 1.15
 const BASE_WINDOW_HOURS = 1
@@ -355,7 +359,8 @@ export const honored = (save: TycoonSave): TycoonSave => {
     : { ...save, feats: [...save.feats, ...due.map(feat => feat.id)] }
 }
 
-const weightsAt = (lifeEarned: number): number =>
+/** The weights a lifetime's earnings come to. */
+export const weightsAt = (lifeEarned: number): number =>
   Math.floor(Math.cbrt(lifeEarned / SHIP_AT) + 1e-9)
 
 /** The weights a ship would pay now. */
@@ -390,3 +395,74 @@ export const shipped = (save: TycoonSave): TycoonSave => {
 
 export const rankOf = (ships: number): string =>
   RANKS.findLast(rank => ships >= rank.ships)?.name ?? ''
+
+// What two sums of the same tokens may differ by, from the order they were
+// added in.
+const DRIFT = 1e-6
+
+/** What the generators and the upgrades a save holds cost in all. */
+const spentOf = (save: TycoonSave): number =>
+  GENERATORS.reduce(
+    (sum, generator) => sum + priceOf(generator, 0, save.owned[generator.id] ?? 0),
+    0,
+  ) +
+  save.upgrades.reduce((sum, id) => sum + (UPGRADE_BY_ID.get(id)?.cost ?? 0), 0)
+
+const sumOf = (counts: readonly number[]): number =>
+  counts.reduce((sum, count) => sum + count, 0)
+
+/**
+ * What of a save does not add up by these rules, or undefined when all of it
+ * does: the leaderboard's server asks this of every save it is sent. A run
+ * pays for what it holds out of what it earned, an upgrade and a feat are
+ * open by the save's own counts, weights come of lifetime earnings, and the
+ * counts agree with each other. A feat for owning a generator outlives the
+ * ship that gave the generator up, and one for real tokens is not sent, so
+ * neither is asked for.
+ */
+export const flawOf = (save: TycoonSave): string | undefined => {
+  const { stats } = save
+  const families = Object.entries(save.calls)
+  const checks: readonly (readonly [string, boolean])[] = [
+    ['spent', save.tokens + spentOf(save) <= save.runEarned * (1 + DRIFT) + DRIFT],
+    ['earned', save.runEarned <= save.lifeEarned * (1 + DRIFT) + DRIFT],
+    [
+      'weights',
+      save.weights <= weightsAt(save.lifeEarned) &&
+        save.ships <= save.weights &&
+        (save.ships === 0) === (save.weights === 0),
+    ],
+    [
+      'upgrades',
+      save.upgrades.every(id => {
+        const upgrade = UPGRADE_BY_ID.get(id)
+
+        return (
+          upgrade !== undefined &&
+          (upgrade.after === undefined || save.upgrades.includes(upgrade.after)) &&
+          isMet(upgrade.gate, save)
+        )
+      }),
+    ],
+    [
+      'feats',
+      FEATS.filter(feat => save.feats.includes(feat.id)).every(
+        ({ gate }) =>
+          gate.kind === 'burned' ||
+          (gate.kind === 'owned' && save.ships > 0) ||
+          isMet(gate, save),
+      ),
+    ],
+    [
+      'counts',
+      sumOf(families.filter(([family]) => family !== 'turn').map(([, count]) => count)) ===
+        stats.calls &&
+        (save.calls.turn ?? 0) === stats.turns &&
+        stats.fails <= stats.calls &&
+        sumOf(Object.values(save.owned)) <= stats.bought,
+    ],
+  ]
+
+  return checks.find(([, isSound]) => !isSound)?.[0]
+}
+

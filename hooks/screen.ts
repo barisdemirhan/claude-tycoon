@@ -2,7 +2,8 @@
 // and the hooks module that acts on a key both read it here, so a row's key
 // is the same in both.
 
-import type { TycoonSave, TycoonView } from '../types'
+import type { TycoonBoard, TycoonSave, TycoonStanding, TycoonView } from '../types'
+import { PAGES, placeOf, rowText } from './board'
 import { FAMILIES, FEATS, GENERATORS } from './catalog'
 import type { Generator, Upgrade } from './catalog'
 import { counted, grouped, short } from './format'
@@ -26,6 +27,8 @@ export type Action =
   | { kind: 'upgrade'; id: string }
   | { kind: 'upgradeAll' }
   | { kind: 'ship' }
+  | { kind: 'page'; page: number }
+  | { kind: 'name' }
 
 /** One line of a tab that is read and not pressed. */
 export type Line = { text: string; isDim?: true }
@@ -35,6 +38,7 @@ export const TABS: readonly { tab: Tab; key: string; name: string }[] = [
   { tab: 'upgrades', key: 'u', name: 'Upgrades' },
   { tab: 'records', key: 'r', name: 'Records' },
   { tab: 'ship', key: 'p', name: 'Ship' },
+  { tab: 'top', key: 't', name: 'Top' },
 ]
 // A row's key by its place in the list: the digits, then two letters no tab
 // or control takes.
@@ -45,6 +49,7 @@ export const WIDE_FROM = 100
 export const QTY_KEY = 'x'
 export const ALL_KEY = 'b'
 export const SHIP_KEY = 'y'
+export const NAME_KEY = 'n'
 export const QTYS = [1, 10, 100] as const
 const MINE_KEYS = [' ', 'm']
 const UPGRADE_ROWS = 9
@@ -102,6 +107,15 @@ export const actionOf = (
     }
 
     return key === ALL_KEY ? { kind: 'upgradeAll' } : undefined
+  }
+
+  if (view.tab === 'top') {
+    // A page of the global top is under the key of its number: 0 is the tenth.
+    if (row >= 0 && row < PAGES) {
+      return { kind: 'page', page: row + 1 }
+    }
+
+    return key === NAME_KEY ? { kind: 'name' } : undefined
   }
 
   return view.tab === 'ship' && key === SHIP_KEY ? { kind: 'ship' } : undefined
@@ -176,3 +190,42 @@ export const shipLabel = (save: TycoonSave, view: TycoonView): string =>
   view.isArmed
     ? 'again: give this run up and ship'
     : `ship for ${counted(weightsDue(save), 'weight')}`
+
+const BOARD_NOTES: Readonly<Record<TycoonBoard['state'], string>> = {
+  idle: 'asking the leaderboard…',
+  asking: 'asking the leaderboard…',
+  ready: 'nobody is on it yet: a name takes the first place',
+  silent: 'the leaderboard did not answer',
+}
+
+/**
+ * The top tab's rows: a page of the global top with this person's own row
+ * marked, or a line on why there is none to show.
+ */
+export const topLines = (board: TycoonBoard, { name }: TycoonStanding): Line[] =>
+  board.top.length === 0
+    ? [{ text: BOARD_NOTES[board.state], isDim: true }]
+    : board.top.map((row, at) => ({
+        text: `${row.name === name ? '▸' : ' '}${rowText(row, placeOf(board, at))}`,
+      }))
+
+/**
+ * Under the rows: how many are on the board, and where this person stands,
+ * or how they get on it. `isAsked` while the keys field takes their name.
+ */
+export const standingText = (
+  board: TycoonBoard,
+  { name, rank }: TycoonStanding,
+  isAsked: boolean,
+): string => {
+  // The row is short where the pane is narrow: the question goes alone.
+  if (isAsked) {
+    return 'a name below joins the board'
+  }
+
+  const players = board.players === 0 ? [] : [counted(board.players, 'player')]
+  const yours = rank > 0 ? `you are #${grouped(rank)}` : `${name}: your save goes up soon`
+
+  return [...players, name === '' ? `${NAME_KEY} takes a name` : yours].join(' · ')
+}
+

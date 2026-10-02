@@ -4,7 +4,7 @@
 
 import type { Elements, RenderElement } from 'claude-code'
 
-import type { TycoonSave, TycoonView } from '../types'
+import type { TycoonBoard, TycoonSave, TycoonStanding, TycoonView } from '../types'
 import type { Generator, Upgrade } from './catalog'
 import { price, short } from './format'
 import {
@@ -17,6 +17,8 @@ import {
   recordLines,
   shipLabel,
   shipLines,
+  standingText,
+  topLines,
   upgradeRows,
 } from './screen'
 import type { Line } from './screen'
@@ -118,12 +120,30 @@ const upgradeRow = (
 const said = ({ Text }: Kit, lines: readonly Line[]): RenderElement[] =>
   lines.map(line => <Text dimColor={line.isDim === true}>{line.text}</Text>)
 
+/** The pages of the global top, each a button under the key of its number. */
+const pages = ({ Box, Button }: Kit, board: TycoonBoard, press: Press): RenderElement => (
+  <Box columnGap={2} flexWrap="wrap">
+    {ROW_KEYS.slice(0, board.pages).map((key, at) => (
+      <Button
+        key={`page-${at + 1}`}
+        plain
+        hotkey={key}
+        label={`Page ${at + 1}`}
+        dimColor={at + 1 !== board.page}
+        onPress={() => press(key)}
+      />
+    ))}
+  </Box>
+)
+
 /** The tabs and the tab in view. */
 export const body = (
   kit: Kit,
   save: TycoonSave,
   view: TycoonView,
   press: Press,
+  board: TycoonBoard,
+  standing: TycoonStanding,
 ): RenderElement => {
   const { Box, Button, Text } = kit
   const listed = upgradeRows(save)
@@ -169,6 +189,11 @@ export const body = (
             />,
           ]
         : []),
+    ],
+    top: () => [
+      ...said(kit, topLines(board, standing)),
+      pages(kit, board, press),
+      <Text dimColor>{standingText(board, standing, false)}</Text>,
     ],
   }
 

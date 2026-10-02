@@ -1,6 +1,6 @@
 import type { ClientModule, ClientSurface } from 'claude-code'
 
-import type { TycoonSave, TycoonView } from '../types'
+import type { TycoonBoard, TycoonSave, TycoonStanding, TycoonView } from '../types'
 import {
   ART,
   COIN,
@@ -34,6 +34,8 @@ import {
   write,
 } from './canvas'
 import type { Canvas } from './canvas'
+import { PAGE } from './board'
+import { UPGRADES } from './catalog'
 import { grouped, price, short, span } from './format'
 import {
   ALL_KEY,
@@ -46,6 +48,8 @@ import {
   recordLines,
   shipLabel,
   shipLines,
+  standingText,
+  topLines,
   upgradeRows,
 } from './screen'
 import type { Line } from './screen'
@@ -78,10 +82,17 @@ export type GameProps = {
   mines: number
   // The last press of this screen's the hooks module has acted on.
   acked: number
+  // The global top as last fetched, who this person is on it, and whether
+  // the field under the screen is asking for their name.
+  board: TycoonBoard
+  standing: TycoonStanding
+  isAsked: boolean
 }
 
-// A coin on its way up, with what it says beside it.
-type Coin = { x: number; age: number; text: string }
+// A coin on its way up, with what it says beside it: a gem, for a ship.
+type Coin = { x: number; age: number; text: string; isGem?: true }
+// A generator lit for a moment, with what came to it rising over it.
+type Pop = { id: string; age: number; text: string; color: string }
 type Press = { seq: number; key: string }
 // A stretch of cells that takes a click as a key.
 type Hit = { x: number; row: number; wide: number; key: string }
@@ -94,7 +105,13 @@ type Game = {
   until: number
   calls: number
   mines: number
+  // What the save held when the props last came: a buy, an upgrade and a
+  // ship each show against it.
+  owned: TycoonSave['owned']
+  upgrades: readonly string[]
+  ships: number
   coins: Coin[]
+  pops: Pop[]
   // Beats the spark stays lit after a call.
   glow: number
   // Beats since anything happened: a quiet screen is drawn less often.
@@ -122,9 +139,12 @@ const STAGE_WIDE = 52
 const HUD_ROWS = 3
 // Stacked over the shop, the scene is this tall where the screen spares it,
 // the shop keeping this many rows; a scene shorter than its least is left out.
-const STAGE_SCENE_ROWS = 6
+const STAGE_SCENE_ROWS = 7
 const MIN_SCENE_ROWS = 4
 const SHOP_ROWS = 11
+// The top tab keeps more: a clear row, the tabs and their rule, a page of the
+// board and the line under it.
+const TOP_SHOP_ROWS = PAGE + 4
 // The sky is the scene less this many pixels of what stands on the ground.
 const SKYLINE = 9
 const MIN_SKY = 3
@@ -135,13 +155,25 @@ const CALM_EVERY = 4
 const GLOW_BEATS = 4
 const COIN_BEATS = 9
 const MOST_COINS = 4
+const POP_BEATS = 9
+// Beats of a pop its generator stays lit for.
+const FLASH_BEATS = 3
+// A generator stands again behind itself once for each of these it has
+// reached, each one this far along and this much darker than the one before.
+const DEPTH_AT = [10, 50, 100]
+const DEPTH_STEP = 2
+const DEPTH_SHADE = 0.2
+// Every model shipped is a gold star, up to this many.
+const MOST_SHIP_STARS = 25
 const MOST_PENDING = 16
 const BLINK_BEATS = 5
 const STAR_EVERY = 7
 const SPARK_X = 2
 const FIRST_X = 10
 const SPRITE_GAP = 2
-const ALOFT_EVERY = 10
+const ALOFT_GAP = 3
+// The sky what hangs in it needs: under that, the ground gives it the room.
+const ALOFT_SKY = 5
 // What an unlit scene keeps of its colors.
 const ASLEEP_SHADE = 0.4
 const DIGIT_X = 7
@@ -187,7 +219,30 @@ const caughtUp = (game: Game, props: GameProps): Game => {
     age: -at,
     text: at === 0 ? `+${short(clickOf(props.save))}` : '',
   }))
+  const { owned, upgrades, ships } = props.save
+  const bought = Object.keys(ART)
+    .map(id => ({ id, more: (owned[id] ?? 0) - (game.owned[id] ?? 0) }))
+    .filter(({ more }) => more > 0)
+    .map(({ id, more }) => ({ id, age: 0, text: `+${grouped(more)}`, color: WHITE }))
+  const upgraded = upgrades
+    .filter(id => !game.upgrades.includes(id))
+    .flatMap(id => UPGRADES.filter(upgrade => upgrade.id === id))
+  const doubled = upgraded.flatMap(({ effect }) =>
+    effect.kind === 'generator'
+      ? [{ id: effect.id, age: 0, text: `×${effect.times}`, color: GOLD }]
+      : [],
+  )
+  // An upgrade of no generator's is the spark's own: its tag rises from it.
+  const learned = upgraded
+    .filter(({ effect }) => effect.kind !== 'generator')
+    .slice(-MOST_COINS)
+    .map(({ tag }, at) => ({ x: SPARK_X + 1, age: -at * 2, text: tag }))
+  const launched =
+    ships > game.ships
+      ? [{ x: SPARK_X, age: 0, text: `${rankOf(ships)} shipped`, isGem: true as const }]
+      : []
   const hasNews = calls + mines > 0
+  const hasMoved = hasNews || bought.length + upgraded.length + launched.length > 0
 
   return {
     ...game,
@@ -196,9 +251,15 @@ const caughtUp = (game: Game, props: GameProps): Game => {
     until: untilOf(props, game.beats),
     calls: props.calls,
     mines: props.mines,
-    coins: [...game.coins, ...earned, ...mined].slice(-MOST_COINS * 2),
+    owned,
+    upgrades,
+    ships,
+    coins: [...game.coins, ...earned, ...mined, ...learned, ...launched].slice(
+      -MOST_COINS * 2,
+    ),
+    pops: [...game.pops, ...bought, ...doubled],
     glow: hasNews ? GLOW_BEATS : game.glow,
-    calm: hasNews ? 0 : game.calm,
+    calm: hasMoved ? 0 : game.calm,
     seq: Math.max(game.seq, props.acked),
     pending: game.pending.filter(press => press.seq > props.acked),
   }
@@ -209,6 +270,9 @@ const step = (game: Game): Game => ({
   coins: game.coins
     .map(coin => ({ ...coin, age: coin.age + 1 }))
     .filter(coin => coin.age <= COIN_BEATS),
+  pops: game.pops
+    .map(pop => ({ ...pop, age: pop.age + 1 }))
+    .filter(pop => pop.age <= POP_BEATS),
   glow: Math.max(0, game.glow - 1),
   calm: game.calm + 1,
 })
@@ -235,7 +299,11 @@ const start = (surface: ClientSurface<Game>, props: GameProps): Game => {
     until: untilOf(props, 0),
     calls: props.calls,
     mines: props.mines,
+    owned: props.save.owned,
+    upgrades: props.save.upgrades,
+    ships: props.save.ships,
     coins: [],
+    pops: [],
     glow: 0,
     calm: 0,
     seq: props.acked,
@@ -252,7 +320,7 @@ const start = (surface: ClientSurface<Game>, props: GameProps): Game => {
 
     // Time passes whether the screen is drawn or not.
     now.beats += 1
-    const isMoving = now.coins.length > 0 || now.glow > 0
+    const isMoving = now.coins.length + now.pops.length > 0 || now.glow > 0
     const isCounting = now.beats <= now.until
     const isDue = now.calm < CALM_BEATS || now.beats % CALM_EVERY === 0
 
@@ -344,6 +412,10 @@ const hud = ({ props, live, rate, isAsleep }: Frame, canvas: Canvas): void => {
   })
 }
 
+/** A palette with every color of it changed. */
+const tinted = (palette: Palette, tint: (color: string) => string): Palette =>
+  Object.fromEntries(Object.entries(palette).map(([letter, color]) => [letter, tint(color)]))
+
 const paletteOf = (art: Art, beats: number, at: number, isAsleep: boolean): Palette => {
   const isBlinked =
     !isAsleep &&
@@ -354,16 +426,72 @@ const paletteOf = (art: Art, beats: number, at: number, isAsleep: boolean): Pale
       ? { ...art.palette, [art.blink[0]]: art.blink[1] }
       : art.palette
 
-  return isAsleep
-    ? Object.fromEntries(
-        Object.entries(lit).map(([letter, color]) => [letter, shade(color, ASLEEP_SHADE)]),
-      )
-    : lit
+  return isAsleep ? tinted(lit, color => shade(color, ASLEEP_SHADE)) : lit
+}
+
+/** How many times a generator stands again behind itself, by how many are owned. */
+const depthOf = (owned: number): number => DEPTH_AT.filter(at => owned >= at).length
+
+const wideOf = (id: string, owned: number): number =>
+  (ART[id]?.sprite[0]?.length ?? 0) + depthOf(owned) * DEPTH_STEP
+
+/**
+ * One generator of the scene with its top left at a pixel: as many behind it
+ * as its count has earned, itself lit while a pop of its own is new, and what
+ * the pop says rising over it.
+ */
+const generator = (
+  { game, live, isAsleep }: Frame,
+  canvas: Canvas,
+  id: string,
+  at: number,
+  x: number,
+  y: number,
+  y0: number,
+): void => {
+  const art = ART[id]
+
+  if (art === undefined) {
+    return
+  }
+
+  // The newest pop of its own, where one is still on its way up.
+  const pop = game.pops.findLast(one => one.id === id)
+  const palette = paletteOf(art, game.beats, at, isAsleep)
+
+  for (let behind = depthOf(live.owned[id] ?? 0); behind > 0; behind -= 1) {
+    stamp(
+      canvas,
+      x + behind * DEPTH_STEP,
+      y,
+      art.sprite,
+      tinted(palette, color => shade(color, 1 - behind * DEPTH_SHADE)),
+    )
+  }
+
+  stamp(
+    canvas,
+    x,
+    y,
+    art.sprite,
+    pop !== undefined && pop.age < FLASH_BEATS ? tinted(palette, () => pop.color) : palette,
+  )
+
+  if (pop !== undefined) {
+    // Over what stands on the ground, and under what hangs in the sky.
+    const at =
+      art.isAloft === true ? y + art.sprite.length + 1 + pop.age : y - 2 - pop.age
+
+    if (at >= y0) {
+      write(canvas, x, Math.floor(at / 2), pop.text, pop.color, BOLD)
+    }
+  }
 }
 
 /**
- * The scene over `rows` rows from `top`: the spark at work, one of every
- * generator owned, the sky over them, and the coins on their way up.
+ * The scene over `rows` rows from `top`: the spark at work, every kind of
+ * generator owned, the sky over them with a gold star for each model shipped,
+ * and the coins on their way up.
  */
 const scene = (frame: Frame, canvas: Canvas, top: number, rows: number): void => {
   const { game, live, isAsleep } = frame
@@ -372,8 +500,14 @@ const scene = (frame: Frame, canvas: Canvas, top: number, rows: number): void =>
   const owned = Object.keys(ART).filter(id => (live.owned[id] ?? 0) > 0)
   const standing = owned.filter(id => ART[id]?.isAloft !== true)
   const aloft = owned.filter(id => ART[id]?.isAloft === true)
-  const widths = standing.map(id => (ART[id]?.sprite[0]?.length ?? 0) + SPRITE_GAP)
-  const room = canvas.w - FIRST_X - 1
+  const widths = standing.map(id => wideOf(id, live.owned[id] ?? 0) + SPRITE_GAP)
+  const hung = aloft.map(id => wideOf(id, live.owned[id] ?? 0) + ALOFT_GAP)
+  const sky = Math.max(MIN_SKY, rows * 2 - SKYLINE)
+  const room =
+    canvas.w -
+    FIRST_X -
+    1 -
+    (sky < ALOFT_SKY ? hung.reduce((sum, width) => sum + width, 0) : 0)
   // The first ones give way when the row is full: the last are the dearest.
   let from = 0
   let wide = widths.reduce((sum, width) => sum + width, 0)
@@ -382,8 +516,6 @@ const scene = (frame: Frame, canvas: Canvas, top: number, rows: number): void =>
     wide -= widths[from] ?? 0
     from += 1
   }
-
-  const sky = Math.max(MIN_SKY, rows * 2 - SKYLINE)
 
   for (let x = 0; x < canvas.w; x += STAR_EVERY) {
     const at = x + Math.floor(hash(x, 1) * STAR_EVERY)
@@ -396,35 +528,28 @@ const scene = (frame: Frame, canvas: Canvas, top: number, rows: number): void =>
     dot(canvas, x, ground, isAsleep ? shade(SLATE, ASLEEP_SHADE) : SLATE)
   }
 
-  aloft.forEach((id, at) => {
-    const art = ART[id]
+  for (let at = 0; at < Math.min(live.ships, MOST_SHIP_STARS); at += 1) {
+    dot(
+      canvas,
+      Math.floor(hash(at, 3) * canvas.w),
+      y0 + Math.floor(hash(at, 4) * sky),
+      isAsleep ? shade(GOLD, ASLEEP_SHADE) : GOLD,
+    )
+  }
 
-    if (art !== undefined) {
-      stamp(
-        canvas,
-        canvas.w - (at + 1) * ALOFT_EVERY,
-        y0 + (at % 2),
-        art.sprite,
-        paletteOf(art, game.beats, at, isAsleep),
-      )
-    }
+  let right = canvas.w
+
+  aloft.forEach((id, at) => {
+    right -= hung[at] ?? 0
+    // Every other one hangs a pixel lower, where the sky has the pixel.
+    generator(frame, canvas, id, at, right, y0 + (sky > ALOFT_SKY ? at % 2 : 0), y0)
   })
 
   let x = FIRST_X
 
   standing.slice(from).forEach((id, at) => {
-    const art = ART[id]
-
-    if (art !== undefined) {
-      stamp(
-        canvas,
-        x,
-        ground - art.sprite.length,
-        art.sprite,
-        paletteOf(art, game.beats, at, isAsleep),
-      )
-      x += (art.sprite[0]?.length ?? 0) + SPRITE_GAP
-    }
+    generator(frame, canvas, id, at, x, ground - (ART[id]?.sprite.length ?? 0), y0)
+    x += widths[from + at] ?? 0
   })
 
   stamp(
@@ -450,8 +575,11 @@ const scene = (frame: Frame, canvas: Canvas, top: number, rows: number): void =>
     const y = ground - SPARK.length - 2 - Math.max(0, coin.age)
 
     if (coin.age >= 0 && y >= y0) {
-      stamp(canvas, coin.x, y, COIN, COIN_PALETTE)
-      write(canvas, coin.x + 3, Math.floor(y / 2), coin.text, GOLD, BOLD)
+      const sprite = coin.isGem === true ? GEM : COIN
+      const wide = sprite[0]?.length ?? 0
+
+      stamp(canvas, coin.x, y, sprite, coin.isGem === true ? GEM_PALETTE : COIN_PALETTE)
+      write(canvas, coin.x + wide + 1, Math.floor(y / 2), coin.text, GOLD, BOLD)
     }
   }
 }
@@ -504,9 +632,9 @@ const tabs = ({ props, live, hits }: Frame, canvas: Canvas, row: number): void =
     const isShown = tab === props.view.tab
 
     write(canvas, x, row, key, GOLD, BOLD)
-    write(canvas, x + 2, row, label, isShown ? GOLD : FG, isShown ? INVERSE | BOLD : DIM)
-    hits.push({ x, row, wide: label.length + 2, key })
-    x += label.length + 3
+    write(canvas, x + 1, row, label, isShown ? GOLD : FG, isShown ? INVERSE | BOLD : DIM)
+    hits.push({ x, row, wide: label.length + 1, key })
+    x += label.length + 2
   }
 
   if (props.view.tab === 'build') {
@@ -663,6 +791,42 @@ const ship = (frame: Frame, canvas: Canvas, top: number): void => {
   }
 }
 
+/**
+ * A page of the global top, this person's own row marked, and under it the
+ * pages, each under the key of its number, with where this person stands.
+ */
+const board = ({ props, hits }: Frame, canvas: Canvas, top: number): void => {
+  const foot = Math.min(canvas.h - 1, top + PAGE)
+
+  topLines(props.board, props.standing)
+    .slice(0, foot - top)
+    .forEach(({ text, isDim }, at) => {
+      const isOwn = text.startsWith('▸')
+
+      write(canvas, 1, top + at, text, isOwn ? GOLD : FG, isOwn ? BOLD : isDim === true ? DIM : 0)
+    })
+
+  let x = 1
+
+  for (let page = 1; page <= props.board.pages; page += 1) {
+    const key = ROW_KEYS[page - 1] ?? ''
+    const isShown = page === props.board.page
+
+    write(canvas, x, foot, key, GOLD, isShown ? INVERSE | BOLD : BOLD)
+    hits.push({ x, row: foot, wide: 2, key })
+    x += 2
+  }
+
+  write(
+    canvas,
+    x + 1,
+    foot,
+    standingText(props.board, props.standing, props.isAsked),
+    FG,
+    DIM,
+  )
+}
+
 /** The tabs, and under them what the tab in view lists. */
 const shop = (frame: Frame, canvas: Canvas): void => {
   const top = 2
@@ -671,6 +835,7 @@ const shop = (frame: Frame, canvas: Canvas): void => {
     upgrades: () => upgrades(frame, canvas, top),
     records: () => void lines(canvas, top, recordLines(frame.live)),
     ship: () => ship(frame, canvas, top),
+    top: () => board(frame, canvas, top),
   }
 
   tabs(frame, canvas, 0)
@@ -730,7 +895,10 @@ const paint = (screen: Canvas, game: Game, props: GameProps): Hit[] => {
   // Stacked, the stage takes what the list can spare, up to its own best.
   const high = Math.min(
     HUD_ROWS + STAGE_SCENE_ROWS + 1,
-    Math.max(HUD_ROWS + 1, screen.h - SHOP_ROWS),
+    Math.max(
+      HUD_ROWS + 1,
+      screen.h - (props.view.tab === 'top' ? TOP_SHOP_ROWS : SHOP_ROWS),
+    ),
   )
 
   return [

@@ -55,7 +55,7 @@ export type TycoonSave = {
  * its second press, and whether the pane is open at all.
  */
 export type TycoonView = {
-  tab: 'build' | 'upgrades' | 'records' | 'ship'
+  tab: 'build' | 'upgrades' | 'records' | 'ship' | 'top'
   qty: 1 | 10 | 100
   isArmed: boolean
   isOpen: boolean
@@ -84,6 +84,31 @@ export type TycoonInput = { typed: number; acked: number }
 /** What the person switched with `/tycoon hint`. */
 export type TycoonSettings = { hasHint: boolean }
 
+/** One row of the global top: a name, what it has earned in all, and its ships. */
+export type TycoonRow = { name: string; score: number; ships: number }
+
+/**
+ * The global top as the game last fetched it: one page of its rows, which
+ * page of how many, how many players it holds, and whether it is being asked
+ * for or did not answer.
+ */
+export type TycoonBoard = {
+  state: 'idle' | 'asking' | 'ready' | 'silent'
+  top: TycoonRow[]
+  page: number
+  pages: number
+  players: number
+}
+
+/** The person's name and place on the global top: no name until they join. */
+export type TycoonStanding = { name: string; rank: number }
+
+/**
+ * Whether the keys field asks for a name for the global top, and whether the
+ * person has put the question away for this session.
+ */
+export type TycoonAsk = { isAsked: boolean; isShut: boolean }
+
 declare module 'claude-code' {
   interface PluginState {
     tycoon: {
@@ -96,6 +121,11 @@ declare module 'claude-code' {
       settings: TycoonSettings
       /** When the open pane was last told to draw again. */
       pulse: number
+      /** The global top, as the game shows it. */
+      board: TycoonBoard
+      /** Who the person is on the global top. */
+      standing: TycoonStanding
+      ask: TycoonAsk
     }
   }
 }

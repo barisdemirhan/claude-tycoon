@@ -1,8 +1,29 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { TycoonSave, TycoonSettings } from '../types'
+import type { TycoonBoard, TycoonSave, TycoonSettings } from '../types'
 import { fieldOf, toSave, toSettings } from './bank'
+import {
+  NOBODY,
+  NO_BOARD,
+  SILENT,
+  boardOf,
+  enrolled,
+  nameText,
+  named,
+  pageOf,
+  placed,
+  posted,
+  ranked,
+  refusalOf,
+  saveBody,
+  sentText,
+  toPlayer,
+  topPath,
+  topText,
+  urlOf,
+} from './board'
+import type { Player, Told } from './board'
 import { counted, short, span } from './format'
 import type { GameProps } from './game'
 import { body } from './pane'
@@ -18,6 +39,7 @@ import {
   featsDue,
   fresh,
   honored,
+  openUpgrades,
   perksOf,
   rankOf,
   rateOf,
@@ -26,6 +48,7 @@ import {
   shipped,
   upgraded,
   upgradedAll,
+  weightsDue,
   windowLeft,
 } from './sim'
 
@@ -46,14 +69,16 @@ type Press = { seq: number; key: string }
 const PANE = 'tycoon'
 const GAME = 'game'
 const KEYS = 'keys'
+const TOGGLE = 'toggle'
 const SAVE = 'save'
 const SETTINGS = 'settings'
+const PLAYER = 'player'
 // The rows the game's screen wants: fewer on a wide pane, where its stage
 // stands beside its shop, and more docked, where the pane is as tall as the
 // terminal. It takes no more than the pane's body shows beside the keys
 // field and the hint, so those two stay in view.
 const WIDE_ROWS = 14
-const TALL_ROWS = 22
+const TALL_ROWS = 23
 const DOCK_ROWS = 28
 const MIN_ROWS = 10
 const FIELD_ROWS = 2
@@ -62,6 +87,10 @@ const PULSE_MS = 5000
 const MINE_MS = 200
 // A gap this long between two settles is told as time away.
 const AWAY_MS = 10 * 60_000
+// A save goes up to the global top by itself no more often than this, and
+// before the board is looked at, no more often than that.
+const SEND_EVERY_MS = 10 * 60_000
+const PEEK_EVERY_MS = 60_000
 // A streak is shown while a call could still build on it.
 const STREAK_SHOWS_MS = 60_000
 const TOOL_WIDTH = 16
@@ -69,8 +98,12 @@ const TOOL_WIDTH = 16
 // does not count, and a tail that overruns the row is cut.
 const HINT_MARGIN = 6
 const HINT_GAP = 2
+// What the hint line draws beside its text, as cells: the indent it starts
+// at, and the pills its text does not hold.
+const HINT_INDENT = 2
+const HINT_PILLS = 18
 const USAGE =
-  'Usage: /tycoon [play], /tycoon stop, /tycoon stats, /tycoon hint [on|off] or /tycoon reset confirm.'
+  'Usage: /tycoon [play], /tycoon stop, /tycoon stats, /tycoon top [page], /tycoon name [<name>|off], /tycoon leave, /tycoon hint [on|off] or /tycoon reset confirm.'
 const PLAY_WORDS = ['', 'play']
 const SWITCH: Readonly<Record<string, boolean>> = { on: true, off: false }
 
@@ -99,6 +132,17 @@ const settings = atom({ plugin: 'tycoon', key: 'settings' } as const, {
   hasHint: true,
 })
 const pulse = atom({ plugin: 'tycoon', key: 'pulse' } as const, 0)
+// The global top as last fetched for the game to show, the person's name and
+// place on it, and whether the keys field is asking for that name.
+const board = atom({ plugin: 'tycoon', key: 'board' } as const, NO_BOARD)
+const standing = atom({ plugin: 'tycoon', key: 'standing' } as const, {
+  name: '',
+  rank: 0,
+})
+const ask = atom({ plugin: 'tycoon', key: 'ask' } as const, {
+  isAsked: false,
+  isShut: false,
+})
 
 // The changes to the save, one after another: Claude's calls come in
 // parallel, and each change reads the store before it writes it.
@@ -108,6 +152,8 @@ let beat: Timer | undefined
 // Clicks by hand not yet paid, and what pays them.
 let unpaid = 0
 let payday: Timer | undefined
+// What the leaderboard has refused a save with this session: each is said once.
+const refused = new Set<string>()
 
 const toPresses = (data: unknown): Press[] => {
   const keys = fieldOf(data, 'keys')
@@ -147,6 +193,9 @@ const gameProps = async ($: EngineInterface): Promise<GameProps> => {
     streak: await streakAt($, now),
     ...(await read($, feed)),
     acked,
+    board: await read($, board),
+    standing: await read($, standing),
+    isAsked: (await read($, ask)).isAsked,
   }
 }
 
@@ -258,6 +307,224 @@ const earn = async (
   }))
 }
 
+const playerOf = async ($: EngineInterface): Promise<Player> =>
+  toPlayer(await $.store.get(PLAYER))
+
+/** Keeps the player, and hands the game their name and place to show. */
+const filed = async ($: EngineInterface, player: Player): Promise<void> => {
+  await $.store.set(PLAYER, player)
+  await update($, standing, () => ({ name: player.name, rank: player.rank }))
+}
+
+/**
+ * Asks the leaderboard's server, and answers its status and what it said:
+ * status 0 when it could not be reached or said nothing a board would say.
+ */
+const asked = async (
+  $: EngineInterface,
+  path: string,
+  body?: Record<string, unknown>,
+): Promise<{ status: number; said: unknown }> => {
+  try {
+    const { status, text } = await $.http.fetch(
+      urlOf(path),
+      body === undefined ? undefined : posted(body),
+    )
+    const said: unknown = JSON.parse(text)
+
+    return { status, said }
+  } catch {
+    return { status: 0, said: undefined }
+  }
+}
+
+/**
+ * Sends the save for the server to read with the game's rules and count.
+ * Answers the player as the board has them now, or what the server refused with.
+ */
+const submitted = async ($: EngineInterface, save: TycoonSave): Promise<Player | string> => {
+  const player = await playerOf($)
+  const { status, said } = await asked($, '/saves', saveBody(player, save))
+
+  if (status !== 200) {
+    return refusalOf(said)
+  }
+
+  const after = { ...ranked(player, said), sentAt: await $.clock.now() }
+  await filed($, after)
+
+  return after
+}
+
+/**
+ * Sends the save by itself, when this person is on the global top, it has
+ * earned more than the board has from them, and the last one went `gap` ago
+ * or longer. A toast says so when it moved them up, and the first time one
+ * is held back or refused.
+ */
+const reported = async (
+  $: EngineInterface,
+  save: TycoonSave,
+  gap: number,
+): Promise<void> => {
+  const before = await playerOf($)
+  const now = await $.clock.now()
+
+  if (before.name === '' || save.lifeEarned <= before.best || now - before.sentAt < gap) {
+    return
+  }
+
+  // Marked before the server is asked: another session may be at the same.
+  await $.store.set(PLAYER, { ...before, sentAt: now })
+  const after = await submitted($, save)
+
+  if (typeof after === 'string') {
+    if (after !== SILENT && !refused.has(after)) {
+      refused.add(after)
+      $.ui.toast(after)
+    }
+
+    return
+  }
+
+  const isUp = after.rank > 0 && (before.rank === 0 || after.rank < before.rank)
+
+  if (isUp || (after.isHeld && !before.isHeld)) {
+    $.ui.toast(
+      after.isHeld
+        ? 'Tycoon · save held to be looked over'
+        : `Tycoon · #${after.rank} on the global top`,
+    )
+  }
+}
+
+/**
+ * Takes `name` on the global top for this person, or changes the name they
+ * have there, and sends the save as it stands. The first time, it makes the
+ * id and the secret their saves go under, and keeps them once the server has
+ * taken the name.
+ */
+const join = async ($: EngineInterface, name: string): Promise<Told> => {
+  const player = enrolled(await playerOf($))
+  const { status, said } = await asked($, '/players', {
+    id: player.id,
+    key: player.key,
+    name,
+  })
+
+  if (status !== 200) {
+    return { isDone: false, text: refusalOf(said) }
+  }
+
+  const taken = named(player, said)
+  await filed($, taken)
+  const { after: save } = await commit($, kept => kept)
+  const welcome = `You are on the global top as ${taken.name}.`
+
+  if (save.lifeEarned <= taken.best) {
+    return { isDone: true, text: `${welcome} What you earn goes up from here on.` }
+  }
+
+  const after = await submitted($, save)
+
+  return {
+    isDone: true,
+    text: `${welcome} ${typeof after === 'string' ? after : sentText(after)}`,
+  }
+}
+
+/** `/tycoon leave`: takes this person and their save off the global top. */
+const leftText = async ($: EngineInterface): Promise<string> => {
+  const player = await playerOf($)
+
+  if (player.name === '') {
+    return 'You are not on the global top.'
+  }
+
+  const { status, said } = await asked($, '/leave', {
+    id: player.id,
+    key: player.key,
+  })
+
+  // A player the server no longer knows is as gone as one it just removed.
+  if (status !== 200 && status !== 403) {
+    return refusalOf(said)
+  }
+
+  await filed($, { ...NOBODY, isOff: true })
+  // The page the game last showed had them on it.
+  await update($, board, () => NO_BOARD)
+
+  return 'You are off the global top, and your save there is deleted.'
+}
+
+/** `/tycoon name off`: the top tab stops asking for a name. */
+const declinedText = async ($: EngineInterface): Promise<string> => {
+  const player = await playerOf($)
+
+  if (player.name !== '') {
+    return `You are on the global top as ${player.name}. /tycoon leave takes you off it.`
+  }
+
+  await $.store.set(PLAYER, { ...player, isOff: true })
+  await update($, ask, now => ({ ...now, isAsked: false }))
+
+  return 'Tycoon will not ask for a name again. /tycoon name <name> joins the global top.'
+}
+
+/**
+ * Fetches a page of the global top for the game to show. What it showed
+ * before stays up while the server is asked, and after a silence.
+ */
+const boarded = async ($: EngineInterface, page: number): Promise<void> => {
+  await update($, board, (now): TycoonBoard => ({ ...now, state: 'asking' }))
+  const { status, said } = await asked($, topPath(await playerOf($), page))
+  const fetched = boardOf(status, said)
+
+  if (fetched === undefined) {
+    await update($, board, (now): TycoonBoard => ({ ...now, state: 'silent' }))
+
+    return
+  }
+
+  await update($, board, () => fetched)
+  const player = await playerOf($)
+
+  if (player.name !== '') {
+    await filed($, placed(player, said))
+  }
+}
+
+/** The board's first page, with this person's own save sent ahead of it. */
+const peeked = async ($: EngineInterface): Promise<void> => {
+  await reported($, (await commit($, save => save)).after, PEEK_EVERY_MS)
+  await boarded($, 1)
+}
+
+/**
+ * The top tab came into view: the board is fetched, and somebody who is not
+ * on it, and has not put the question away, is asked for a name.
+ */
+const topOpened = async ($: EngineInterface): Promise<void> => {
+  const { name, isOff } = await playerOf($)
+  await update($, ask, now => ({
+    ...now,
+    isAsked: name === '' && !isOff && !now.isShut,
+  }))
+  void peeked($).catch(() => undefined)
+}
+
+/** The name key: asks somebody not on the global top for a name, and tells the others theirs. */
+const nameAsked = async ($: EngineInterface): Promise<void> => {
+  const player = await playerOf($)
+
+  if (player.name === '') {
+    await update($, ask, now => ({ ...now, isAsked: true }))
+  } else {
+    $.ui.toast(nameText(player))
+  }
+}
+
 /** Something the person bought: a toast says so when the balance did not cover it. */
 const spend = async ($: EngineInterface, change: Change): Promise<void> => {
   const { isChanged } = await commit($, change)
@@ -288,6 +555,8 @@ const shipIt = async ($: EngineInterface): Promise<void> => {
     $.ui.toast(
       `Tycoon · ${rankOf(after.ships)} shipped · +${counted(after.weights - before.weights, 'weight')}`,
     )
+    // The board shows the new rank beside the name.
+    void reported($, after, 0).catch(() => undefined)
   }
 }
 
@@ -312,6 +581,19 @@ const pressed = async ($: EngineInterface, key: string): Promise<void> => {
   switch (action?.kind) {
     case 'tab':
       await update($, view, kept => ({ ...kept, tab: action.tab, isArmed: false }))
+
+      if (action.tab === 'top') {
+        await topOpened($)
+      } else {
+        await update($, ask, kept => ({ ...kept, isAsked: false }))
+      }
+
+      break
+    case 'page':
+      void boarded($, action.page).catch(() => undefined)
+      break
+    case 'name':
+      await nameAsked($)
       break
     case 'qty':
       await update($, view, kept => ({ ...kept, qty: qtyAfter(kept.qty) }))
@@ -341,8 +623,43 @@ const pressed = async ($: EngineInterface, key: string): Promise<void> => {
  * it draws the field with another value, which empties it for the next.
  */
 const keyed = async ($: EngineInterface, value: string): Promise<void> => {
+  // While a name is asked for, the field takes the name and presses nothing.
+  if ((await read($, ask)).isAsked) {
+    return
+  }
+
   await update($, input, now => ({ ...now, typed: now.typed + 1 }))
   await pressed($, (value.at(-1) ?? '').toLowerCase())
+}
+
+/**
+ * Enter in the keys field: a click by hand. While a name is asked for, the
+ * name joins the global top, and enter alone puts the question away.
+ */
+const entered = async ($: EngineInterface, value: string): Promise<void> => {
+  const name = value.trim()
+
+  if (!(await read($, ask)).isAsked) {
+    await pressed($, ' ')
+
+    return
+  }
+
+  const told = name === '' ? undefined : await join($, name)
+
+  if (told !== undefined) {
+    $.ui.toast(told.text)
+  }
+
+  if (told === undefined || told.isDone) {
+    await update($, ask, () => ({ isAsked: false, isShut: true }))
+    // A key that is no press: it only empties the field of the name.
+    await update($, input, now => ({ ...now, typed: now.typed + 1 }))
+  }
+
+  if (told?.isDone === true) {
+    void boarded($, 1).catch(() => undefined)
+  }
 }
 
 /** The presses the game's screen posted that were not acted on yet, acted on in order. */
@@ -397,7 +714,7 @@ const hintText = async ($: EngineInterface, word: string): Promise<string> => {
   await stored($, { hasHint })
 
   return hasHint
-    ? 'The balance shows at the end of the hint line under the prompt.'
+    ? 'The balance shows on the hint line under the prompt: a click on it opens and closes the game.'
     : 'The balance is off the hint line.'
 }
 
@@ -413,15 +730,86 @@ const resetText = ($: EngineInterface): Promise<string> =>
     return 'Tycoon is reset: the balance, the generators, the upgrades, the weights and the achievements are gone.'
   })
 
+/** Opens the pane, as `/tycoon` does, and says whether it found room. */
+const shown = async ($: EngineInterface, columns: number): Promise<string> => {
+  await commit($, save => save)
+  await update($, view, now => ({ ...now, isOpen: true, isArmed: false }))
+  beating($)
+  const opened = await $.ui.open({
+    id: PANE,
+    title: 'Token Tycoon',
+    focus: true,
+    rows: (columns >= WIDE_FROM ? WIDE_ROWS : TALL_ROWS) + FIELD_ROWS,
+  })
+
+  return opened.isPlaced
+    ? "Tycoon is open: Claude's tool calls earn tokens, 1-9 buy, space mines by hand."
+    : `Tycoon is open but has no room to show: ${opened.reason}`
+}
+
+/** Closes the pane, as `/tycoon stop` does: the game goes on earning. */
+const hidden = async ($: EngineInterface): Promise<void> => {
+  beat?.cancel()
+  await update($, view, now => ({ ...now, isOpen: false }))
+  await $.ui.close({ id: PANE })
+}
+
+/** A click on the balance under the prompt: the pane opens, or closes. */
+const toggled = async ($: EngineInterface, columns: number): Promise<void> => {
+  if ((await read($, view)).isOpen) {
+    await hidden($)
+  } else {
+    await shown($, columns)
+  }
+}
+
+/**
+ * The balance as the footer under the prompt shows it, with what waits on
+ * the person: the upgrades the balance covers, a ship that is due, and their
+ * place on the global top. Undefined before anything is earned, and while
+ * `/tycoon hint off` stands.
+ */
+const footerLabel = async ($: EngineInterface): Promise<string | undefined> => {
+  const kept = await read($, bank)
+
+  if (kept === null || kept.lifeEarned === 0 || !(await read($, settings)).hasHint) {
+    return undefined
+  }
+
+  const save = settled(kept, await $.clock.now())
+  const open = openUpgrades(save).filter(upgrade => upgrade.cost <= save.tokens)
+  const { rank } = await read($, standing)
+
+  return [
+    `◈ ${short(save.tokens)} +${short(rateOf(save))}/s`,
+    ...(open.length === 0 ? [] : [`↑${open.length}`]),
+    ...(weightsDue(save) === 0 ? [] : ['ship']),
+    ...(rank === 0 ? [] : [`#${rank}`]),
+  ].join(' · ')
+}
+
+/** The line under the keys field: what the keys do, or what a name does. */
+const hintOf = (isAsked: boolean, isFocused: boolean): string => {
+  if (isAsked) {
+    return 'enter joins the global top under this name · enter alone leaves it for now'
+  }
+
+  return isFocused
+    ? 'space mine · 1-9 buy · g u r p t tabs · esc leaves'
+    : 'ctrl+x tab gives the game the keys · a click buys'
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'tycoon',
       description: "Run a token business on Claude's tool calls, in a pane",
-      argumentHint: '[play|stop|stats|hint|reset]',
+      argumentHint: '[play|stop|stats|top|name|leave|hint|reset]',
     })
     const saved = toSettings(await $.store.get(SETTINGS))
+    const { name, rank } = await playerOf($)
     await update($, settings, () => saved)
+    await update($, standing, () => ({ name, rank }))
     const { kept, before } = await commit($, save => save)
     const made = before.tokens - kept.tokens
 
@@ -460,8 +848,44 @@ export const register: Register = on => {
       }
     }
 
+    if (verb === 'name' && word === 'off') {
+      return { text: await declinedText($) }
+    }
+
+    if (verb === 'name' && word !== '') {
+      // The name as typed: the words above are lowered to match commands.
+      const told = await join($, e.args.trim().split(/\s+/)[1] ?? '')
+
+      if (told.isDone) {
+        await update($, ask, now => ({ ...now, isAsked: false }))
+      }
+
+      return { text: told.text }
+    }
+
+    if (verb === 'top') {
+      const page = pageOf(word)
+
+      if (page === undefined) {
+        return { text: USAGE }
+      }
+
+      await reported($, (await commit($, save => save)).after, PEEK_EVERY_MS)
+      const { status, said } = await asked($, topPath(await playerOf($), page))
+
+      return { text: topText(status, said) }
+    }
+
     if (word !== '') {
       return { text: USAGE }
+    }
+
+    if (verb === 'name') {
+      return { text: nameText(await playerOf($)) }
+    }
+
+    if (verb === 'leave') {
+      return { text: await leftText($) }
     }
 
     if (verb === 'stats') {
@@ -469,9 +893,7 @@ export const register: Register = on => {
     }
 
     if (verb === 'stop') {
-      beat?.cancel()
-      await update($, view, now => ({ ...now, isOpen: false }))
-      await $.ui.close({ id: PANE })
+      await hidden($)
 
       return { text: 'Tycoon is closed, and still earns. /tycoon opens it again.' }
     }
@@ -480,22 +902,7 @@ export const register: Register = on => {
       return { text: USAGE }
     }
 
-    await commit($, save => save)
-    await update($, view, now => ({ ...now, isOpen: true, isArmed: false }))
-    beating($)
-    const opened = await $.ui.open({
-      id: PANE,
-      title: 'Token Tycoon',
-      focus: true,
-      rows:
-        (e.presentation.columns >= WIDE_FROM ? WIDE_ROWS : TALL_ROWS) + FIELD_ROWS,
-    })
-
-    return {
-      text: opened.isPlaced
-        ? "Tycoon is open: Claude's tool calls earn tokens, 1-9 buy, space mines by hand."
-        : `Tycoon is open but has no room to show: ${opened.reason}`,
-    }
+    return { text: await shown($, e.presentation.columns) }
   })
 
   on('ui.message', async ($, e, next) => {
@@ -537,32 +944,62 @@ export const register: Register = on => {
     const written = e.usage?.output_tokens
 
     if (!e.isAborted && written !== undefined) {
-      await commit($, save => salaried(save, written)).catch(() => undefined)
+      const paid = await commit($, save => salaried(save, written)).catch(
+        () => undefined,
+      )
+
+      // What was earned goes up to the global top, for somebody who is on it.
+      if (paid !== undefined) {
+        void reported($, paid.after, SEND_EVERY_MS).catch(() => undefined)
+      }
     }
 
     return next(e)
   })
 
-  // The balance at the end of the hint line under the prompt, where it shows
-  // with the pane closed and takes no row of its own. The hint's text is the
-  // engine's to draw: this only adds to its tail.
+  // The balance on the hint line under the prompt, where it shows with the
+  // pane closed and takes no row of its own. Where a click can reach it, it
+  // is a button at the row's end that opens the pane and closes it, drawn
+  // over the engine's line, which stays as it came with what other mods
+  // added to it. Where no click can, or the row is too short, it is text at
+  // the line's end, as the engine draws a tail.
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
-    const kept = await read($, bank)
+    const label = await footerLabel($)
 
-    if (kept === null || kept.lifeEarned === 0 || !(await read($, settings)).hasHint) {
+    if (label === undefined) {
       return next(e)
     }
 
-    const save = settled(kept, await $.clock.now())
-    const label = `◈ ${short(save.tokens)} +${short(rateOf(save))}/s`
-    const tail = tailed(
-      e.props.hint,
-      e.props.tail ?? '',
-      label,
-      e.viewport?.columns ?? 0,
-    )
+    const columns = e.viewport?.columns ?? 0
+    const drawn = `${e.props.hint}${e.props.tail ?? ''}`
+    const left = columns - label.length - HINT_MARGIN
+    const hasPointer = e.surface !== 'terminal' || e.viewport?.isFullscreen === true
 
-    return next({ ...e, props: { ...e.props, tail } })
+    if (!hasPointer || left < HINT_INDENT + drawn.length + HINT_PILLS) {
+      const tail = tailed(e.props.hint, e.props.tail ?? '', label, columns)
+
+      return next({ ...e, props: { ...e.props, tail } })
+    }
+
+    const line = await next(e)
+    const { Box, Button } = $.ui.resolve(e)
+
+    return (
+      <Box>
+        {line}
+        {/* The engine draws its line on the row over the tree's own first:
+            one row up is that line's row. */}
+        <Box position="absolute" top={-1} left={left}>
+          <Button
+            key={TOGGLE}
+            plain
+            dimColor
+            label={label}
+            onPress={() => toggled($, columns)}
+          />
+        </Box>
+      </Box>
+    )
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -579,7 +1016,14 @@ export const register: Register = on => {
             ◈ {short(props.save.tokens)} +{short(rateOf(props.save))}/s
           </ui.Text>
           <ui.Text dimColor>{noteOf(props)}</ui.Text>
-          {body(ui, props.save, props.view, key => void pressed($, key))}
+          {body(
+            ui,
+            props.save,
+            props.view,
+            key => void pressed($, key),
+            props.board,
+            props.standing,
+          )}
         </ui.Box>
       )
     }
@@ -608,20 +1052,19 @@ export const register: Register = on => {
         />
         {/* The field is the keyboard: every key typed into it is one press, and
             drawing a value other than the last one empties it again. */}
+        {/* On the top tab, for somebody not on the global top, the same field
+            asks for a name: it keeps the focus, and enter alone puts it away. */}
         <ui.Input
           key={KEYS}
-          label="keys"
-          submitLabel="mine"
+          label={props.isAsked ? 'name' : 'keys'}
+          placeholder={props.isAsked ? 'a name for the global top' : undefined}
+          submitLabel={props.isAsked ? 'join' : 'mine'}
           value={typed % 2 === 0 ? '' : ' '}
           autoFocus
           onInput={value => keyed($, value)}
-          onSubmit={() => pressed($, ' ')}
+          onSubmit={value => entered($, value)}
         />
-        <ui.Text dimColor>
-          {e.props.isFocused
-            ? 'space mine · 1-9 buy · g u r p tabs · esc leaves'
-            : 'ctrl+x tab gives the game the keys · a click buys'}
-        </ui.Text>
+        <ui.Text dimColor>{hintOf(props.isAsked, e.props.isFocused)}</ui.Text>
       </ui.Box>
     )
   })

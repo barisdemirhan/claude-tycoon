@@ -1,0 +1,21 @@
+name = "claude-tycoon-board"
+main = "index.ts"
+compatibility_date = "2025-12-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "claude-tycoon-board"
+database_id = "c79d60a8-cd97-416d-be88-47985a4c0df7"
+migrations_dir = "migrations"
+
+# How often one address may write and read in a minute, counted at the edge
+# with no database behind it: a flood is turned away before it costs a query.
+[[ratelimits]]
+name = "WRITES"
+namespace_id = "4201"
+simple = { limit = 10, period = 60 }
+
+[[ratelimits]]
+name = "READS"
+namespace_id = "4202"
+simple = { limit = 60, period = 60 }

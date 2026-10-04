@@ -75,4 +75,5 @@ export const toSave = (value: unknown, now: number): TycoonSave => {
 
 export const toSettings = (value: unknown): TycoonSettings => ({
   hasHint: fieldOf(value, 'hasHint') !== false,
+  isClosed: fieldOf(value, 'isClosed') === true,
 })

@@ -81,8 +81,12 @@ export type TycoonFeed = {
  */
 export type TycoonInput = { typed: number; acked: number }
 
-/** What the person switched with `/tycoon hint`. */
-export type TycoonSettings = { hasHint: boolean }
+/** What the person switched with `/tycoon hint` and `/tycoon close`. */
+export type TycoonSettings = {
+  hasHint: boolean
+  /** True after `/tycoon close`: the pane and the balance on the hint line are both away. */
+  isClosed: boolean
+}
 
 /** One row of the global top: a name, what it has earned in all, and its ships. */
 export type TycoonRow = { name: string; score: number; ships: number }

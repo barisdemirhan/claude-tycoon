@@ -73,13 +73,14 @@ The balance also shows on the hint line under the prompt, with what waits on you
 
 | Command | What it does |
 | --- | --- |
-| `/tycoon` or `/tycoon play` | Opens the game |
-| `/tycoon stop` | Closes the pane. The game goes on earning |
+| `/tycoon` or `/tycoon play` | Opens the game, and brings back what `/tycoon close` took away |
+| `/tycoon stop` | Closes the pane. The game goes on earning, and the balance stays on the hint line, where a click opens the pane again |
+| `/tycoon close` | Takes it all away, in every open session within two seconds: the pane, the balance on the hint line and the toasts the game sends by itself. `/tycoon exit` and `/tycoon quit` do the same. The game goes on earning, and `/tycoon` brings them back as they were |
 | `/tycoon stats` | The balance and the counts, as one line |
 | `/tycoon top` | The first page of the global top. `/tycoon top 3` is the third |
 | `/tycoon name <name>` | Joins the global top under that name, or changes the name you have there. `/tycoon name` says who you are on it, `/tycoon name off` stops the Top tab asking |
 | `/tycoon leave` | Takes you off the global top and deletes your save there |
-| `/tycoon hint` | Takes the balance off the hint line under the prompt, or puts it back. `/tycoon hint on` and `/tycoon hint off` say which |
+| `/tycoon hint` | Takes the balance off the hint line under the prompt, or puts it back, in every open session within two seconds. `/tycoon hint on` and `/tycoon hint off` say which |
 | `/tycoon reset confirm` | Deletes the save |
 
 ## Requirements
@@ -104,11 +105,11 @@ The same as a privacy policy: [PRIVACY.md](PRIVACY.md).
 
 It reads two things of each tool call Claude makes: the tool's name, to pay it by its kind and show it in the pane, and whether the call failed. It reads nothing of the call's arguments or output. Of each turn's end it reads one number: the output tokens the turn cost.
 
-It saves three things in the plugin's own Claude Code store: the game (the balance, what you own, the counts above), your one setting and, once you join the global top, your name, id and secret there. Several sessions share that save. Each change reads it before writing it, so two sessions earn side by side; if both write in the same instant, the later one stands.
+It saves three things in the plugin's own Claude Code store: the game (the balance, what you own, the counts above), your two settings (`/tycoon hint` and `/tycoon close`) and, once you join the global top, your name, id and secret there. Several sessions share that save. Each change reads it before writing it, so two sessions earn side by side; if both write in the same instant, the later one stands.
 
 Its hooks, all in `hooks/register.tsx`:
 
-- `session.start` registers the `/tycoon` command, loads the setting and who you are on the global top, and settles the save, then passes the event on unchanged.
+- `session.start` registers the `/tycoon` command, loads the settings and who you are on the global top, and settles the save, then passes the event on unchanged. From then on the session looks at the settings in the store every two seconds, for what another session switched.
 - `command.run` answers only the `/tycoon` command. Other commands never reach it.
 - `ui.render` draws only the mod's own pane. It also adds the balance to the hint line under the prompt: a button laid over the line's right end where a click can reach it, a tail after the line's text elsewhere. The line itself is left as the engine and other mods drew it.
 - `ui.message` acts only on the keys the mod's own screen posts. Any other message is passed on untouched.

@@ -83,6 +83,9 @@ const DOCK_ROWS = 28
 const MIN_ROWS = 10
 const FIELD_ROWS = 2
 const PULSE_MS = 5000
+// Every session looks this often at what another may have switched: the
+// balance on the hint line, and close.
+const LOOK_MS = 2000
 // Clicks by hand are paid together, this long after the first of them.
 const MINE_MS = 200
 // A gap this long between two settles is told as time away.
@@ -103,8 +106,10 @@ const HINT_GAP = 2
 const HINT_INDENT = 2
 const HINT_PILLS = 18
 const USAGE =
-  'Usage: /tycoon [play], /tycoon stop, /tycoon stats, /tycoon top [page], /tycoon name [<name>|off], /tycoon leave, /tycoon hint [on|off] or /tycoon reset confirm.'
+  'Usage: /tycoon [play], /tycoon stop, /tycoon close, /tycoon stats, /tycoon top [page], /tycoon name [<name>|off], /tycoon leave, /tycoon hint [on|off] or /tycoon reset confirm.'
 const PLAY_WORDS = ['', 'play']
+// Other words for closing it all: the pane, the balance on the hint line and the toasts.
+const CLOSE_WORDS = ['close', 'exit', 'quit']
 const SWITCH: Readonly<Record<string, boolean>> = { on: true, off: false }
 
 const bank = atom({ plugin: 'tycoon', key: 'bank' } as const, null)
@@ -130,6 +135,7 @@ const input = atom({ plugin: 'tycoon', key: 'input' } as const, {
 })
 const settings = atom({ plugin: 'tycoon', key: 'settings' } as const, {
   hasHint: true,
+  isClosed: false,
 })
 const pulse = atom({ plugin: 'tycoon', key: 'pulse' } as const, 0)
 // The global top as last fetched for the game to show, the person's name and
@@ -149,6 +155,8 @@ const ask = atom({ plugin: 'tycoon', key: 'ask' } as const, {
 let queue: Promise<unknown> = Promise.resolve()
 // What tells the open pane to draw again; nothing beats with the pane shut.
 let beat: Timer | undefined
+// What looks at the store for what another session switched.
+let look: Timer | undefined
 // Clicks by hand not yet paid, and what pays them.
 let unpaid = 0
 let payday: Timer | undefined
@@ -274,7 +282,8 @@ const commit = ($: EngineInterface, change: Change): Promise<Committed> =>
     await update($, bank, () => after)
 
     // A toast is a box forty cells wide: one name fits it, a list does not.
-    if (earned.length > 0) {
+    // Closed, the game sends no toast of its own accord.
+    if (earned.length > 0 && !(await read($, settings)).isClosed) {
       $.ui.toast(
         earned.length === 1
           ? `Tycoon · ${earned[0]?.name ?? ''} · +${percent(FEAT_BONUS)}`
@@ -360,7 +369,7 @@ const submitted = async ($: EngineInterface, save: TycoonSave): Promise<Player |
  * Sends the save by itself, when this person is on the global top, it has
  * earned more than the board has from them, and the last one went `gap` ago
  * or longer. A toast says so when it moved them up, and the first time one
- * is held back or refused.
+ * is held back or refused, unless the game is closed.
  */
 const reported = async (
   $: EngineInterface,
@@ -377,6 +386,11 @@ const reported = async (
   // Marked before the server is asked: another session may be at the same.
   await $.store.set(PLAYER, { ...before, sentAt: now })
   const after = await submitted($, save)
+
+  // Closed, the save still goes up, and nothing is said of it.
+  if ((await read($, settings)).isClosed) {
+    return
+  }
 
   if (typeof after === 'string') {
     if (after !== SILENT && !refused.has(after)) {
@@ -691,21 +705,34 @@ const beating = ($: EngineInterface): void => {
   beat = $.clock.every(PULSE_MS, () => void pulsed($).catch(() => undefined))
 }
 
-/** Changes a setting for this session and keeps it for the next ones. */
+/**
+ * Changes a setting for this session and keeps it for the next ones, and for
+ * the others open, which take it up at their next look. A change that brings
+ * the balance back to the hint line leaves the game closed no longer.
+ */
 const stored = async (
   $: EngineInterface,
   change: Partial<TycoonSettings>,
 ): Promise<TycoonSettings> => {
-  const next = await update($, settings, now => ({ ...now, ...change }))
+  const changed =
+    change.isClosed === undefined && change.hasHint === true
+      ? { ...change, isClosed: false }
+      : change
+  // Over the store's own: another session may have switched the rest since.
+  const next = { ...toSettings(await $.store.get(SETTINGS)), ...changed }
   await $.store.set(SETTINGS, next)
+  await update($, settings, () => next)
 
   return next
 }
 
+/** True while the balance shows on the hint line: kept there, and not closed with the pane. */
+const isHintShown = (now: TycoonSettings): boolean => now.hasHint && !now.isClosed
+
 /** `/tycoon hint [on|off]`: the word's way, or the other way with no word. */
 const hintText = async ($: EngineInterface, word: string): Promise<string> => {
   const hasHint =
-    word === '' ? !(await read($, settings)).hasHint : SWITCH[word]
+    word === '' ? !isHintShown(await read($, settings)) : SWITCH[word]
 
   if (hasHint === undefined) {
     return USAGE
@@ -754,6 +781,42 @@ const hidden = async ($: EngineInterface): Promise<void> => {
   await $.ui.close({ id: PANE })
 }
 
+/**
+ * `/tycoon close`: the pane away, the balance on the hint line with it, and
+ * the toasts the game sends of its own accord, in every open session at its
+ * next look. The game goes on earning, and `/tycoon` brings them back.
+ */
+const closedText = async ($: EngineInterface): Promise<string> => {
+  await hidden($)
+  await stored($, { isClosed: true })
+
+  return 'Tycoon is closed: the pane, the balance on the hint line and its toasts are away, and it still earns. /tycoon brings them back.'
+}
+
+/**
+ * Takes up what another session switched: the balance on the hint line, and
+ * close, which takes this session's pane away with the rest.
+ */
+const looked = async ($: EngineInterface): Promise<void> => {
+  const kept = toSettings(await $.store.get(SETTINGS))
+  const now = await read($, settings)
+
+  if (kept.hasHint === now.hasHint && kept.isClosed === now.isClosed) {
+    return
+  }
+
+  await update($, settings, () => kept)
+
+  if (kept.isClosed && !now.isClosed && (await read($, view)).isOpen) {
+    await hidden($)
+  }
+}
+
+const looking = ($: EngineInterface): void => {
+  look?.cancel()
+  look = $.clock.every(LOOK_MS, () => void looked($).catch(() => undefined))
+}
+
 /** A click on the balance under the prompt: the pane opens, or closes. */
 const toggled = async ($: EngineInterface, columns: number): Promise<void> => {
   if ((await read($, view)).isOpen) {
@@ -766,13 +829,13 @@ const toggled = async ($: EngineInterface, columns: number): Promise<void> => {
 /**
  * The balance as the footer under the prompt shows it, with what waits on
  * the person: the upgrades the balance covers, a ship that is due, and their
- * place on the global top. Undefined before anything is earned, and while
- * `/tycoon hint off` stands.
+ * place on the global top. Undefined before anything is earned, while
+ * `/tycoon hint off` stands, and while the game is closed.
  */
 const footerLabel = async ($: EngineInterface): Promise<string | undefined> => {
   const kept = await read($, bank)
 
-  if (kept === null || kept.lifeEarned === 0 || !(await read($, settings)).hasHint) {
+  if (kept === null || kept.lifeEarned === 0 || !isHintShown(await read($, settings))) {
     return undefined
   }
 
@@ -804,16 +867,18 @@ export const register: Register = on => {
     await $.command.register({
       name: 'tycoon',
       description: "Run a token business on Claude's tool calls, in a pane",
-      argumentHint: '[play|stop|stats|top|name|leave|hint|reset]',
+      argumentHint: '[play|stop|close|stats|top|name|leave|hint|reset]',
     })
     const saved = toSettings(await $.store.get(SETTINGS))
     const { name, rank } = await playerOf($)
     await update($, settings, () => saved)
     await update($, standing, () => ({ name, rank }))
+    // What another session switches reaches this one at its next look.
+    looking($)
     const { kept, before } = await commit($, save => save)
     const made = before.tokens - kept.tokens
 
-    if (e.isInteractive && before.at - kept.at >= AWAY_MS && made > 0) {
+    if (e.isInteractive && !saved.isClosed && before.at - kept.at >= AWAY_MS && made > 0) {
       $.ui.toast(`Tycoon · made ◈${short(made)} while away`)
     }
 
@@ -895,12 +960,21 @@ export const register: Register = on => {
     if (verb === 'stop') {
       await hidden($)
 
-      return { text: 'Tycoon is closed, and still earns. /tycoon opens it again.' }
+      return {
+        text: 'The pane is closed, and Tycoon still earns. /tycoon opens it again, and /tycoon close takes the balance off the hint line too.',
+      }
+    }
+
+    if (CLOSE_WORDS.includes(verb)) {
+      return { text: await closedText($) }
     }
 
     if (!PLAY_WORDS.includes(verb)) {
       return { text: USAGE }
     }
+
+    // It brings back what /tycoon close took away, in every open session.
+    await stored($, { isClosed: false })
 
     return { text: await shown($, e.presentation.columns) }
   })

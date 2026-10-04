@@ -20,6 +20,14 @@ const PANE = {
   viewport: { columns: 80, rows: 40 },
 } as const
 const SCREEN = { columns: 80, rows: 22, in: 'game' }
+// The hint line under the prompt, in the fullscreen layout a click reaches.
+const HINT = {
+  plugin: 'tycoon',
+  component: 'PromptHint',
+  surface: 'terminal',
+  props: { isDraft: false, isWorking: false, hint: '? for shortcuts' },
+  viewport: { columns: 80, rows: 40, isFullscreen: true },
+} as const
 // `/tycoon stats` as the person types it at the prompt.
 const STATS = {
   command: 'tycoon',
@@ -65,16 +73,30 @@ const TOP = {
   you: null,
 }
 
-/** The engine beneath the game: a store, a clock, and the toasts it was sent. */
+/**
+ * The engine beneath the game: a store, a clock, and the toasts it was sent.
+ * The store is handed back: a test stands in for another session through it.
+ */
 const world = (
   on: On,
   save?: Record<string, unknown>,
   player?: Record<string, unknown>,
 ) => {
   const toasts: string[] = []
-  mock.store(on, {
-    ...(save === undefined ? {} : { save: { ...EMPTY, ...save } }),
-    ...(player === undefined ? {} : { player }),
+  const store = new Map<string, unknown>([
+    ...(save === undefined ? [] : [['save', { ...EMPTY, ...save }] as const]),
+    ...(player === undefined ? [] : [['player', player] as const]),
+  ])
+  on('store.get', (_$, e) => ({ value: store.get(e.key) }))
+  on('store.set', (_$, e) => {
+    store.set(e.key, e.value)
+
+    return { value: undefined }
+  })
+  on('store.delete', (_$, e) => {
+    store.delete(e.key)
+
+    return { value: undefined }
   })
   on('ui.toast', (_$, e) => {
     toasts.push(e.text)
@@ -82,7 +104,7 @@ const world = (
     return { value: undefined }
   })
 
-  return { toasts, clock: mock.clock(on, { now: START }) }
+  return { toasts, store, clock: mock.clock(on, { now: START }) }
 }
 
 const stats = async ($: Engine): Promise<string> =>
@@ -478,8 +500,8 @@ test('/tycoon stop closes the pane that /tycoon opened', async ($, on) => {
   )
   expect(opened).toEqual(['tycoon'])
 
-  expect((await $.command.run({ ...STATS, args: 'stop' })).text).toContain(
-    'Tycoon is closed',
+  expect((await $.command.run({ ...STATS, args: 'stop' })).text).toBe(
+    'The pane is closed, and Tycoon still earns. /tycoon opens it again, and /tycoon close takes the balance off the hint line too.',
   )
   expect(closed).toEqual(['tycoon'])
 })
@@ -530,13 +552,6 @@ test('the balance shows on the hint line once something is earned, and a click o
 
     return { value: undefined }
   })
-  const HINT = {
-    plugin: 'tycoon',
-    component: 'PromptHint',
-    surface: 'terminal',
-    props: { isDraft: false, isWorking: false, hint: '? for shortcuts' },
-    viewport: { columns: 80, rows: 40, isFullscreen: true },
-  } as const
   // The balance and the rate, two upgrades the balance covers, fifth on the board.
   const LABEL = '◈ 1.50K +6.2/s · ↑2 · #5'
 
@@ -574,6 +589,119 @@ test('the balance shows on the hint line once something is earned, and a click o
   expect(await off.find({ key: 'toggle' })).toBeUndefined()
   expect(await off.find({ type: 'Text', text: '◈' })).toBeUndefined()
   await off.unmount()
+})
+
+/**
+ * A session as it starts, under the engine's own hint line: answers the
+ * panes it was asked to open and close, in order.
+ */
+const started = async ($: Engine, on: On): Promise<string[]> => {
+  const moved: string[] = []
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', (_$, e) => ({ value: { command: e.name } }))
+  on('ui.render', { component: 'PromptHint' }, ($$, e) =>
+    $$.ui.resolve(e).Text({ children: `${e.props.hint}${e.props.tail ?? ''}` }),
+  )
+  on('ui.open', (_$, e) => {
+    moved.push(`open ${e.id}`)
+
+    return { value: { isPlaced: true } }
+  })
+  on('ui.close', (_$, e) => {
+    moved.push(`close ${e.id}`)
+
+    return { value: undefined }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  return moved
+}
+
+/** Whether the balance shows on the hint line: a button in the fullscreen layout, the line's tail on the main screen. */
+const hinted = async ($: Engine): Promise<{ isButton: boolean; isTail: boolean }> => {
+  const full = await $.ui.mount(HINT)
+  const isButton = (await full.find({ key: 'toggle' })) !== undefined
+  await full.unmount()
+  const plain = await $.ui.mount({
+    ...HINT,
+    viewport: { ...HINT.viewport, isFullscreen: false },
+  })
+  const isTail = (await plain.find({ type: 'Text', text: '◈' })) !== undefined
+  await plain.unmount()
+
+  return { isButton, isTail }
+}
+
+test('/tycoon close takes the pane, the balance and the toasts away, and /tycoon brings them back as they were', async ($, on) => {
+  const { toasts } = world(on, { tokens: 1500, lifeEarned: 1500, owned: { script: 10 } })
+  on('tool.call', () => ({ result: {} }))
+  const moved = await started($, on)
+  await told($, 'play')
+  expect(await hinted($)).toEqual({ isButton: true, isTail: true })
+
+  expect(await told($, 'close')).toBe(
+    'Tycoon is closed: the pane, the balance on the hint line and its toasts are away, and it still earns. /tycoon brings them back.',
+  )
+  expect(moved).toEqual(['open tycoon', 'close tycoon'])
+  expect(await hinted($)).toEqual({ isButton: false, isTail: false })
+
+  // The game goes on earning, and keeps what it earns to itself: the first
+  // call's achievement is no toast.
+  toasts.length = 0
+  await $.tool.call(BASH)
+  expect(await stats($)).toContain('1 call,')
+  expect(await stats($)).toContain('3 achievements')
+  expect(toasts).toEqual([])
+
+  expect(await told($, '')).toContain('Tycoon is open')
+  expect(moved.at(-1)).toBe('open tycoon')
+  expect(await hinted($)).toEqual({ isButton: true, isTail: true })
+
+  // A balance the person took off the hint line stays off when it comes back.
+  await told($, 'hint off')
+  expect(await told($, 'quit')).toContain('Tycoon is closed')
+  await told($, 'play')
+  expect(await hinted($)).toEqual({ isButton: false, isTail: false })
+
+  // Closed, /tycoon hint brings the balance back on its own.
+  await told($, 'hint on')
+  expect(await told($, 'exit')).toContain('Tycoon is closed')
+  await told($, 'hint')
+  expect(await hinted($)).toEqual({ isButton: true, isTail: true })
+  expect(await told($, 'close now')).toContain('Usage: /tycoon')
+})
+
+test('/tycoon close, /tycoon and /tycoon hint in another session reach this one at its next look', async ($, on) => {
+  const { toasts, store, clock } = world(on, {
+    tokens: 1500,
+    lifeEarned: 1500,
+    owned: { script: 10 },
+  })
+  on('tool.call', () => ({ result: {} }))
+  const moved = await started($, on)
+  // Another session writes to the store this one reads.
+  const elsewhere = (change: object) =>
+    store.set('settings', { ...Object(store.get('settings')), ...change })
+  await told($, 'play')
+
+  elsewhere({ isClosed: true })
+  expect(await hinted($)).toEqual({ isButton: true, isTail: true })
+  await clock.advance(2000)
+  expect(await hinted($)).toEqual({ isButton: false, isTail: false })
+  expect(moved).toEqual(['open tycoon', 'close tycoon'])
+  toasts.length = 0
+  await $.tool.call(BASH)
+  expect(toasts).toEqual([])
+
+  // The balance comes back; the pane is this session's own to open.
+  elsewhere({ isClosed: false })
+  await clock.advance(2000)
+  expect(await hinted($)).toEqual({ isButton: true, isTail: true })
+  expect(moved).toEqual(['open tycoon', 'close tycoon'])
+
+  elsewhere({ hasHint: false })
+  await clock.advance(2000)
+  expect(await hinted($)).toEqual({ isButton: false, isTail: false })
 })
 
 test('/tycoon top lists a page of the board, /tycoon name joins it with the save and /tycoon leave leaves it', async ($, on) => {

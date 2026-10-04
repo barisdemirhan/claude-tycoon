@@ -1,6 +1,6 @@
 {
   "name": "tycoon",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Token Tycoon, an idle game in a pane: Claude's tool calls earn tokens, tokens buy generators and upgrades, and everything is kept between sessions. /tycoon opens it",
   "author": {
     "name": "Barış Demirhan",

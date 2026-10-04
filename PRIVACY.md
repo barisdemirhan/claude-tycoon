@@ -1,10 +1,10 @@
 # Privacy
 
-What the Token Tycoon mod for Claude Code does with data. Last changed on 2 October 2026.
+What the Token Tycoon mod for Claude Code does with data. Last changed on 4 October 2026.
 
 ## If you never use the global top
 
-Nothing leaves your machine. The game keeps your save (the balance, what you own, your achievements and the counts below) and your one setting in the plugin's own Claude Code store, on your disk.
+Nothing leaves your machine. The game keeps your save (the balance, what you own, your achievements and the counts below) and your two settings, `/tycoon hint` and `/tycoon close`, in the plugin's own Claude Code store, on your disk.
 
 Of each tool call Claude makes, the mod reads the tool's name, to pay the call by its kind of work, and whether the call failed. It reads nothing of a call's arguments or output. Of each turn's end it reads one number: the output tokens the turn cost. What it keeps of these are counts: calls by kind of work, failed calls, turns and output tokens in all.
 

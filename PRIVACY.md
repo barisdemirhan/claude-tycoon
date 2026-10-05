@@ -1,6 +1,6 @@
 # Privacy
 
-What the Token Tycoon mod for Claude Code does with data. Last changed on 4 October 2026.
+What the Token Tycoon mod for Claude Code does with data. Last changed on 5 October 2026.
 
 ## If you never use the global top
 
@@ -27,13 +27,23 @@ What the server keeps:
 
 What others see: your name, the tokens you have earned in all, your rank from Haiku to Mythos, and your place on the board.
 
-The server runs on Cloudflare, which handles every request to it as the host. Nothing is sold, shared with anybody else or used for advertising, and the server runs no analytics.
+The server runs on Cloudflare, which handles every request to it as the host; what Cloudflare does with them is in [its privacy policy](https://www.cloudflare.com/privacypolicy/). Nothing is sold, shared with anybody else or used for advertising, and the server runs no analytics.
+
+## What reaches Claude
+
+What `/tycoon` answers is a row of the conversation, as any command's output is: `/tycoon stats` shows the balance and the counts there, and `/tycoon top` a page of the board with your name and your place on it. Claude reads them with the rest of the conversation, which Claude Code sends to the model as it sends everything else in it.
+
+The mod puts nothing else into the conversation and gives Claude no tool.
 
 ## Taking your data off
 
-`/tycoon leave` deletes your name and your save from the server, at once. Your id and secret then go from the plugin's store as well.
+`/tycoon leave` deletes your name and your save from the server, at once. Your id and secret then go from the plugin's store as well. Until you leave, the server keeps what is listed above: nothing there runs out by itself but the hashes of addresses.
 
 If you cannot run the command, [open an issue](https://github.com/barisdemirhan/claude-tycoon/issues) with the name on the board and it will be removed.
+
+What the mod keeps on your machine is one JSON file, the plugin's store: `~/.claude/plugins/store/tycoon_<marketplace>-<id>.json`, which is `tycoon_claude-mods-42ed3c337a0e.json` when installed from `claude-mods`. That is where Claude Code 2.1.288 keeps it; the place is Claude Code's own and may change with it. Deleting the file with no session open takes it all off. Leave the global top first: the secret that lets you is in that file.
+
+To report a security problem in private, see [SECURITY.md](SECURITY.md).
 
 ## Changes
 

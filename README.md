@@ -9,11 +9,31 @@ Type `/tycoon`, buy your first Prompt, and let Claude work. What you build is ke
 ## Install
 
 ```sh
-claude plugin marketplace add barisdemirhan/claude-tycoon
-claude plugin install tycoon@claude-tycoon
+claude plugin marketplace add barisdemirhan/claude-mods
+claude plugin install tycoon@claude-mods
 ```
 
 Restart Claude Code, then run `/tycoon`.
+
+The same two steps work from inside a session with `/plugin marketplace add barisdemirhan/claude-mods` and `/plugin install tycoon@claude-mods`.
+
+[claude-mods](https://github.com/barisdemirhan/claude-mods) is one marketplace for all of these mods, so its first line is needed once for the lot.
+
+### If you installed from `claude-tycoon`
+
+Nothing has to change. This repository is still a marketplace of its own, and `tycoon@claude-tycoon` goes on getting updates.
+
+Moving to `claude-mods` is a new install as Claude Code sees it, and it starts with an empty store: without your save and, if you are on the global top, the secret that makes your name there yours. To bring them along, copy the store's file to its new name before you install, with no Claude Code session open:
+
+```sh
+cp -R ~/.claude/plugins/store ~/claude-store-backup
+cp ~/.claude/plugins/store/tycoon_claude-tycoon-ed96090b0132.json ~/.claude/plugins/store/tycoon_claude-mods-42ed3c337a0e.json
+claude plugin marketplace add barisdemirhan/claude-mods
+claude plugin install tycoon@claude-mods
+claude plugin uninstall tycoon@claude-tycoon
+```
+
+The two file names are where Claude Code 2.1.288 keeps a mod's store. They are Claude Code's own and may change with it. The first line keeps a copy of every store in `~/claude-store-backup`, to put back if the move goes wrong; delete it once the mod shows what it showed before. Uninstalling leaves the old store's file where it is. Keep one of the two installs, not both: with both on, every hook runs twice.
 
 ## How it earns
 
@@ -89,23 +109,27 @@ The balance also shows on the hint line under the prompt, with what waits on you
 - The terminal or the desktop app for the game's own screen. Other surfaces get the same game as buttons and text.
 - A pane at least 36 columns wide and 10 rows tall.
 
-## What it does on your machine
+## Privacy and data handling
 
 The mod registers one slash command and draws one pane. It reads no files and runs no processes. It never changes a prompt, a tool call or a tool's result.
 
-It makes no network request unless you use the global top. Then it talks to one server, `claude-tycoon-board.barisdemirhan.workers.dev`, through Claude Code's own `$.http.fetch`:
+**What it reads.** Two things of each tool call Claude makes: the tool's name, to pay it by its kind and show it in the pane, and whether the call failed. It reads nothing of the call's arguments or output. Of each turn's end it reads one number: the output tokens the turn cost.
+
+**What it sends.** Nothing, unless you use the global top. Then it talks to one server, `claude-tycoon-board.barisdemirhan.workers.dev`, a Cloudflare Worker the author runs, through Claude Code's own `$.http.fetch`:
 
 - `/tycoon top`, and the Top tab in the game, ask for a page of the board. If you have joined, they send your id along to learn where you stand.
 - Joining sends the name you chose, a random id and a random secret made on your machine. The secret is what makes a save yours.
 - Your save goes up as described above: the balance, what the run and the save have earned, how many of each generator you own, the upgrades and achievements you hold, your weights and ships, and the counts of calls by kind of work, failed calls, turns, clicks and generators bought. The real tokens Claude's turns cost are not in it, nor a tool's name, nor anything else of your session.
 
-The server keeps your name, your id, a hash of the secret, what your best save earned and your latest save. To slow a flood it also keeps a salted hash of the address a write came from, which later writes clear out once it is an hour old. `/tycoon leave` deletes your name and your save.
+What the server keeps of these, what others see and for how long is in [PRIVACY.md](PRIVACY.md). `/tycoon leave` deletes your name and your save there.
 
-The same as a privacy policy: [PRIVACY.md](PRIVACY.md).
+**What reaches Claude.** What `/tycoon` answers is a row of the conversation, as any command's output is, and Claude reads it with the rest: `/tycoon stats` shows the balance and the counts, and `/tycoon top` a page of the board with your name and your place on it. The mod puts nothing else into the conversation and gives Claude no tool.
 
-It reads two things of each tool call Claude makes: the tool's name, to pay it by its kind and show it in the pane, and whether the call failed. It reads nothing of the call's arguments or output. Of each turn's end it reads one number: the output tokens the turn cost.
+**What it keeps.** Three things, in the plugin's own Claude Code store, one JSON file under `~/.claude/plugins/store/` on your disk: the game (the balance, what you own, the counts above), your two settings (`/tycoon hint` and `/tycoon close`) and, once you join the global top, your name, id and secret there. Several sessions share that save. Each change reads it before writing it, so two sessions earn side by side; if both write in the same instant, the later one stands.
 
-It saves three things in the plugin's own Claude Code store: the game (the balance, what you own, the counts above), your two settings (`/tycoon hint` and `/tycoon close`) and, once you join the global top, your name, id and secret there. Several sessions share that save. Each change reads it before writing it, so two sessions earn side by side; if both write in the same instant, the later one stands.
+[PRIVACY.md](PRIVACY.md) is the same as a privacy policy, with how to take your data off.
+
+### Hooks
 
 Its hooks, all in `hooks/register.tsx`:
 
@@ -123,7 +147,7 @@ The files under `tests/` run only under `claude plugin test`. They mount the pan
 
 ```sh
 git clone https://github.com/barisdemirhan/claude-tycoon
-claude plugin validate claude-tycoon/.claude-plugin/plugin.json
+claude plugin validate claude-tycoon
 claude plugin test claude-tycoon
 claude --plugin-dir claude-tycoon
 ```
@@ -133,6 +157,14 @@ claude --plugin-dir claude-tycoon
 `hooks/board.ts` is the global top as the plugin sees it, and `worker/` is its server: a Cloudflare Worker over a D1 database that imports the rules from `hooks/`. `wrangler dev` in `worker/` runs it on your machine. A change to a price or a rule raises `RULES` in `hooks/sim.ts`, and the server is deployed with it.
 
 The screen is `hooks/game.tsx`, painted on the pixel canvas of `hooks/canvas.ts` with the sprites of `hooks/art.ts`. `hooks/screen.ts` says what each tab lists and what a key means there, for the screen and for `hooks/pane.tsx`, the buttons the other surfaces get.
+
+## More mods
+
+From the same marketplace, [claude-mods](https://github.com/barisdemirhan/claude-mods):
+
+- [ambient](https://github.com/barisdemirhan/claude-ambient): a living band above the prompt, with sound, fed by Claude's work.
+- [dino](https://github.com/barisdemirhan/claude-dino): a T-Rex runner in a pane, with Claude's tool calls as the obstacles.
+- [pomodoro](https://github.com/barisdemirhan/claude-pomodoro): a pomodoro timer whose break lands while Claude works.
 
 ## License
 
